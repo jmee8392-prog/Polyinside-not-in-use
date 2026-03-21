@@ -462,6 +462,7 @@ class WalletSimulator {
 
 let monitoringActive = false;
 const connectedClients = new Set();
+let lastBroadcastData = null;
 
 class ContinuousMonitor {
   static async startMonitoring() {
@@ -632,4 +633,173 @@ class ContinuousMonitor {
 
     alerts.forEach(alert => {
       db.run(
-        `INSERT INTO alerts (id, wallet_id, alert_type, confid
+        `INSERT INTO alerts (id, wallet_id, alert_type, confidence, message, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [alert.id, alert.walletId, alert.type, alert.confidence, alert.message, alert.timestamp]
+      );
+    });
+
+    Object.values(metrics).forEach(metric => {
+      db.run(
+        `INSERT INTO market_metrics (id, market, fresh_wallet_volume, behavior_shift_volume, fresh_wallet_count, behavior_shift_count, total_market_volume, timestamp)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          `metric_${Date.now()}_${metric.market}`,
+          metric.market,
+          metric.freshWalletVolume,
+          metric.behaviorShiftVolume,
+          metric.freshWalletCount,
+          metric.behaviorShiftCount,
+          metric.totalMarketVolume,
+          new Date()
+        ]
+      );
+    });
+  }
+
+  static broadcastUpdate(data) {
+    lastBroadcastData = data;
+    const message = JSON.stringify({ type: 'update', data });
+    connectedClients.forEach(client => {
+      if (client.readyState === 1) { // WebSocket.OPEN
+        client.send(message);
+      }
+    });
+  }
+}
+
+// ==================== EXPRESS REST API ====================
+
+// GET /api/wallets - List wallets
+app.get('/api/wallets', (req, res) => {
+  const { type, market, limit = 100 } = req.query;
+  let query = 'SELECT * FROM wallets WHERE 1=1';
+  const params = [];
+
+  if (type) {
+    query += ' AND type = ?';
+    params.push(type);
+  }
+  if (market) {
+    query += ' AND market = ?';
+    params.push(market);
+  }
+
+  query += ' ORDER BY updated_at DESC LIMIT ?';
+  params.push(parseInt(limit));
+
+  db.all(query, params, (err, rows) => {
+    if (err) return res.status(500).json({ error: err.message });
+    res.json({ wallets: rows, count: rows.length });
+  });
+});
+
+// GET /api/wallets/:id - Get wallet details
+app.get('/api/wallets/:id', (req, res) => {
+  db.get('SELECT * FROM wallets WHERE id = ?', [req.params.id], (err, wallet) => {
+    if (err) return res.status(500).json({ error: err.message });
+    if (!wallet) return res.status(404).json({ error: 'Wallet not found' });
+
+    db.all('SELECT * FROM transactions WHERE wallet_id = ? ORDER BY timestamp DESC', [req.params.id], (err, transactions) => {
+      if (err) return res.status(500).json({ error: err.message });
+      res.json({ wallet, transactions });
+    });
+  });
+});
+
+// GET /api/alerts - Get recent alerts
+app.get('/api/alerts', (req, res) => {
+  const { limit = 50 } = req.query;
+  db.all(
+    'SELECT * FROM alerts WHERE created_at > datetime("now", "-24 hours") ORDER BY created_at DESC LIMIT ?',
+    [parseInt(limit)],
+    (err, rows) => {
+      if (err) return res.status(500).json({ error: err.message });
+      res.json({ alerts: rows, count: rows.length });
+    }
+  );
+});
+
+// GET /api/markets - Get market metrics
+app.get('/api/markets', (req, res) => {
+  db.all(
+    'SELECT * FROM market_metrics ORDER BY timestamp DESC LIMIT 100',
+    (err, rows) => {
+      if (err) return res.status(500).json({ error: err.message });
+      res.json({ markets: rows });
+    }
+  );
+});
+
+// GET /api/stats - Get summary stats
+app.get('/api/stats', (req, res) => {
+  db.get('SELECT COUNT(*) as total, SUM(CASE WHEN type="fresh" THEN 1 ELSE 0 END) as fresh, SUM(CASE WHEN type="behavioral" THEN 1 ELSE 0 END) as behavioral FROM wallets', (err, row) => {
+    if (err) return res.status(500).json({ error: err.message });
+    res.json({
+      totalWallets: row.total,
+      freshWallets: row.fresh,
+      behavioralWallets: row.behavioral,
+      monitoringActive
+    });
+  });
+});
+
+// GET /api/clusters - Get cluster analysis
+app.get('/api/clusters', (req, res) => {
+  db.all(
+    'SELECT cluster_id, COUNT(*) as wallet_count, AVG(win_rate) as avg_win_rate, AVG(total_profit_loss) as avg_profit FROM wallets WHERE cluster_id IS NOT NULL GROUP BY cluster_id',
+    (err, rows) => {
+      if (err) return res.status(500).json({ error: err.message });
+      res.json({ clusters: rows });
+    }
+  );
+});
+
+// ==================== HTTP SERVER & WEBSOCKET ====================
+
+const PORT = process.env.PORT || 3001;
+
+const server = app.listen(PORT, 'localhost', () => {
+  console.log('╔═══════════════════════════════════════════════════════╗');
+  console.log('║  🎯 POLYMARKET WALLET TRACKER - BACKEND STARTED        ║');
+  console.log(`║  📊 REST API:      http://localhost:${PORT}              ║`);
+  console.log(`║  🔌 WebSocket:     ws://localhost:${PORT}                ║`);
+  console.log('║  💾 Database:      ./polymarket_tracker.db            ║');
+  console.log('║  🚀 24/7 Monitoring: ACTIVE                           ║');
+  console.log('╚═══════════════════════════════════════════════════════╝');
+});
+
+// WebSocket server attached to HTTP server
+const wss = new WebSocket.Server({ server });
+
+wss.on('connection', (ws) => {
+  connectedClients.add(ws);
+  console.log(`Client connected. Total: ${connectedClients.size}`);
+
+  // Send last known data immediately on connect
+  if (lastBroadcastData && ws.readyState === 1) {
+    ws.send(JSON.stringify({ type: 'update', data: lastBroadcastData }));
+  }
+
+  ws.on('close', () => {
+    connectedClients.delete(ws);
+    console.log(`Client disconnected. Total: ${connectedClients.size}`);
+  });
+
+  ws.on('error', (err) => {
+    console.error('WebSocket error:', err);
+    connectedClients.delete(ws);
+  });
+});
+
+// Start continuous monitoring
+ContinuousMonitor.startMonitoring();
+
+// Graceful shutdown
+process.on('SIGTERM', () => {
+  console.log('Shutting down gracefully...');
+  server.close(() => {
+    db.close();
+    process.exit(0);
+  });
+});
