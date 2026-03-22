@@ -54,7 +54,15 @@ exposeLocalhost = true
 localPort = 5000
 externalPort = 80
 
+[[ports]]
+localPort = 5001
+externalPort = 3000
+
 [deployment]
 deploymentTarget = "vm"
 run = ["bash", "-c", "node polymarket_backend.js & cd frontend && npm run dev -- --host 0.0.0.0 --port 5000"]
 build = ["bash", "-c", "cd frontend && npm run build"]
+
+[userenv]
+
+[userenv.shared]
