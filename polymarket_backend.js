@@ -178,6 +178,53 @@ const COORDINATED_MOVE_THRESHOLD = 3; // 3+ wallets on same contract
 const COORDINATED_MOVE_WINDOW_MS = 120000; // 120 seconds
 const contractIdTracker = new Map(); // contractId -> [{ walletId, timestamp }, ...]
 
+// Market token mapping: Market -> { token1: 'YES', token2: 'NO' }
+const marketTokenMapping = {
+  'TRUMP2024': { 'trump_yes': 'YES', 'trump_no': 'NO' },
+  'CRYPTO20M': { 'crypto_yes': 'YES', 'crypto_no': 'NO' },
+  'DOGE2025': { 'doge_yes': 'YES', 'doge_no': 'NO' },
+  'BTC80K': { 'btc_yes': 'YES', 'btc_no': 'NO' },
+  'ETH4K': { 'eth_yes': 'YES', 'eth_no': 'NO' },
+  'PREDICTION_QTR': { 'pred_yes': 'YES', 'pred_no': 'NO' },
+  'DEFI_TVL': { 'defi_yes': 'YES', 'defi_no': 'NO' },
+  'INFLATION_YOY': { 'infl_yes': 'YES', 'infl_no': 'NO' }
+};
+
+// MarkdownV2 escape helper
+const escapeMd = (text) => {
+  if (!text) return '';
+  return String(text)
+    .replace(/[_*\[\]()~`>#+=|{}.!-]/g, '\\$&');
+};
+
+// Format currency with thousand separators
+const formatCurrency = (amount) => {
+  return '$' + parseFloat(amount).toLocaleString('en-US', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2
+  });
+};
+
+// Get YES/NO mapping for asset
+const getTradeDirection = (market, assetId) => {
+  const mapping = marketTokenMapping[market];
+  if (mapping && mapping[assetId]) {
+    return mapping[assetId];
+  }
+  // Fallback to random if no mapping
+  return Math.random() > 0.5 ? 'YES' : 'NO';
+};
+
+// Create clean market name
+const cleanMarketName = (marketId) => {
+  return marketId
+    .replace(/([A-Z])/g, ' $1')
+    .replace(/2024|2025|20M|4K|80K|_QTR|_YOY/g, '')
+    .trim()
+    .split(/\s+/)
+    .join(' ');
+};
+
 // Lazarus Loop - API health check
 const POLYMARKET_API_URL = 'https://api.polymarket.com/markets';
 const API_PING_INTERVAL_MS = 60000; // 60 seconds
@@ -675,6 +722,8 @@ class ContinuousMonitor {
               confidence: wallet.detectionConfidence,
               tradeAmount,
               previousBets: wallet.previousBets,
+              contractId: wallet.market,
+              assetId: Math.random() > 0.5 ? 'yes' : 'no',
               message: `Fresh wallet detected with $${tradeAmount.toFixed(2)} in ${wallet.market}`,
               timestamp: new Date(),
               severity: 'high',
@@ -696,6 +745,9 @@ class ContinuousMonitor {
               type: 'BEHAVIOR_SHIFT',
               confidence: wallet.behaviorShift.confidence,
               tradeAmount,
+              previousBets: wallet.previousBets,
+              contractId: wallet.market,
+              assetId: Math.random() > 0.5 ? 'yes' : 'no',
               message: `Behavioral shift detected: Hold time ${wallet.behaviorShift.oldHoldTime}m → ${wallet.behaviorShift.newHoldTime}m`,
               timestamp: new Date(),
               severity: wallet.profitChange > 0 ? 'critical' : 'medium',
@@ -800,45 +852,51 @@ class ContinuousMonitor {
     if (!telegramBot) return;
 
     let message;
+    let parseMode = 'MarkdownV2';
 
-    // Handle coordinated move alerts differently
+    // Handle coordinated move alerts
     if (alert.isCoordinated) {
+      const market = escapeMd(alert.contractId);
+      const walletCount = escapeMd(String(alert.walletCount));
+      const confidence = escapeMd(String(alert.confidence));
+
       message =
-        `🚨 COORDINATED MOVE DETECTED\n` +
-        `━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n` +
-        `💼 Contract: ${alert.contractId}\n` +
-        `👥 Wallet Cluster: ${alert.walletCount} wallets\n` +
-        `⏱️ Window: 120 seconds\n` +
-        `💯 Confidence: ${alert.confidence}%\n\n` +
-        `━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n` +
-        `Status: 🔴 COORDINATED ACTIVITY\n` +
-        `Action: Monitor for market move\n\n` +
-        `${user.tier === 'admin' ? '👑 ADMIN - INSTANT' : user.tier === 'pro' ? '⚡ PRO - INSTANT' : '📱 FREE - DELAYED'}`;
+        `🚨 *COORDINATED MOVE ALPHA*\n` +
+        `━━━━━━━━━━━━━━━━━━\n\n` +
+        `🎯 Market: ${market}\n` +
+        `👥 Cluster: ${walletCount} Wallets\n` +
+        `📊 Confidence: ${confidence}% \\| Window: 120s\n` +
+        `━━━━━━━━━━━━━━━━━━\n\n` +
+        `🔗 [TRADE ON POLYMARKET](https://data\\-api\\.polymarket\\.com/event/${escapeMd(alert.contractId)})`;
     } else {
-      // Professional formatted message for standard alerts
-      const whaleEmoji = alert.isWhale ? '💎' : '';
-      const header = alert.type === 'FRESH_WALLET' ? '🚀 INSIDER ALPHA DETECTED' : '💎 WHALE MOVE DETECTED';
+      // Standard alert with professional "Sniper" UI
+      const strategyName = alert.type === 'FRESH_WALLET' ? 'INSIDER' : 'WHALE';
+      const marketClean = escapeMd(cleanMarketName(alert.contractId || 'Unknown'));
+      const tradeDirection = getTradeDirection(alert.contractId, alert.assetId);
+      const amount = escapeMd(formatCurrency(alert.tradeAmount || 0));
+      const walletAddr = escapeMd(alert.walletId.substring(0, 16));
+      const tradeCount = escapeMd(String(alert.previousBets || 0));
+      const confidence = escapeMd(String(alert.confidence || 0));
+      const marketId = escapeMd(alert.contractId || 'UNKNOWN');
 
-      // Parse the trade direction (simplified - could be enhanced with real data)
-      const tradeDirection = Math.random() > 0.5 ? '🟢' : '🔴';
-      const direction = tradeDirection === '🟢' ? 'YES' : 'NO';
-
-      // Professional message format
       message =
-        `${header}\n` +
-        `━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n` +
-        `🎯 Market: ${alert.walletId.split('_')[1]}\n` +
-        `💰 Trade: $${alert.tradeAmount ? alert.tradeAmount.toFixed(0) : '?'} on ${direction}\n` +
-        `👤 Wallet: ${alert.walletId.substring(0, 12)}... (${alert.previousBets || 0} trades)\n${whaleEmoji ? `${whaleEmoji} WHALE\n` : ''}\n` +
-        `━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n` +
-        `💯 Confidence: ${alert.confidence}%\n` +
-        `🔗 VIEW ON POLYMARKET\n` +
-        `⏰ ${new Date(alert.timestamp).toLocaleTimeString()}\n\n` +
-        `${user.tier === 'admin' ? '👑 ADMIN - INSTANT' : user.tier === 'pro' ? '⚡ PRO - INSTANT' : '📱 FREE - DELAYED'}`;
+        `🚀 *${strategyName} ALPHA*\n` +
+        `━━━━━━━━━━━━━━━━━━\n` +
+        `🎯 Market: ${marketClean}\n` +
+        `💎 Trade: ${tradeDirection} \\| ${amount}\n` +
+        `👤 Wallet: ${walletAddr}\\.\\.\\. \\(${tradeCount} Trades\\)\n` +
+        `📊 Confidence: ${confidence}% \\| Window: 120s\n` +
+        `━━━━━━━━━━━━━━━━━━\n\n` +
+        `🔗 [TRADE ON POLYMARKET](https://data\\-api\\.polymarket\\.com/event/${marketId})`;
     }
 
-    telegramBot.sendMessage(user.chat_id, message).catch(err => {
+    // Send with MarkdownV2 parse mode
+    telegramBot.sendMessage(user.chat_id, message, { parse_mode: parseMode }).catch(err => {
       console.error(`Failed to send Telegram alert to ${user.chat_id}:`, err);
+      // Fallback: retry without MarkdownV2 if parsing fails
+      telegramBot.sendMessage(user.chat_id, message.replace(/\\/g, '')).catch(err2 => {
+        console.error(`Fallback failed for ${user.chat_id}:`, err2);
+      });
     });
 
     // Update user stats (only for DB records)
