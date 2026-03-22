@@ -29,3 +29,4 @@ Thumbs.db
 .replit
 .cache/
 .local/
+.aider*

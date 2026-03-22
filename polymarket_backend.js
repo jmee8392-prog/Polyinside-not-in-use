@@ -120,6 +120,30 @@ initDatabase();
 let telegramBot = null;
 const telegramUsers = new Map(); // Store user subscription tiers
 
+// Rate limiting: Track message timestamps per user
+const userMessageLog = new Map(); // userId -> array of timestamps
+const RATE_LIMIT_WINDOW_MS = 60000; // 1 minute window
+const MAX_MESSAGES_PER_WINDOW = 10; // Max 10 messages per minute per user
+
+const isRateLimited = (userId) => {
+  const now = Date.now();
+  if (!userMessageLog.has(userId)) {
+    userMessageLog.set(userId, []);
+  }
+
+  const userMessages = userMessageLog.get(userId);
+  // Remove old timestamps outside the window
+  const recentMessages = userMessages.filter(ts => now - ts < RATE_LIMIT_WINDOW_MS);
+  userMessageLog.set(userId, recentMessages);
+
+  if (recentMessages.length >= MAX_MESSAGES_PER_WINDOW) {
+    return true;
+  }
+
+  recentMessages.push(now);
+  return false;
+};
+
 const initTelegramBot = () => {
   const botToken = process.env.TELEGRAM_BOT_TOKEN;
   
@@ -132,6 +156,13 @@ const initTelegramBot = () => {
 
   telegramBot.onText(/\/start/, (msg) => {
     const chatId = msg.chat.id;
+    const userId = `tg_${chatId}`;
+
+    if (isRateLimited(userId)) {
+      telegramBot.sendMessage(chatId, '⏳ Too many requests. Please wait a moment before sending more commands.');
+      return;
+    }
+
     telegramBot.sendMessage(
       chatId,
       '👋 Welcome to Polymarket Insider Tracker!\n\n' +
@@ -146,7 +177,12 @@ const initTelegramBot = () => {
   telegramBot.onText(/\/subscribe_free/, (msg) => {
     const chatId = msg.chat.id;
     const userId = `tg_${chatId}`;
-    
+
+    if (isRateLimited(userId)) {
+      telegramBot.sendMessage(chatId, '⏳ Too many requests. Please wait a moment before sending more commands.');
+      return;
+    }
+
     telegramUsers.set(userId, {
       chatId,
       tier: 'free',
@@ -176,6 +212,11 @@ const initTelegramBot = () => {
     const chatId = msg.chat.id;
     const apiKey = match[1];
     const userId = `tg_${chatId}`;
+
+    if (isRateLimited(userId)) {
+      telegramBot.sendMessage(chatId, '⏳ Too many requests. Please wait a moment before sending more commands.');
+      return;
+    }
 
     // Verify API key format (basic check)
     if (!apiKey || apiKey.length < 10) {
@@ -212,6 +253,12 @@ const initTelegramBot = () => {
   telegramBot.onText(/\/status/, (msg) => {
     const chatId = msg.chat.id;
     const userId = `tg_${chatId}`;
+
+    if (isRateLimited(userId)) {
+      telegramBot.sendMessage(chatId, '⏳ Too many requests. Please wait a moment before sending more commands.');
+      return;
+    }
+
     const user = telegramUsers.get(userId);
 
     if (!user) {
@@ -230,6 +277,13 @@ const initTelegramBot = () => {
 
   telegramBot.onText(/\/help/, (msg) => {
     const chatId = msg.chat.id;
+    const userId = `tg_${chatId}`;
+
+    if (isRateLimited(userId)) {
+      telegramBot.sendMessage(chatId, '⏳ Too many requests. Please wait a moment before sending more commands.');
+      return;
+    }
+
     telegramBot.sendMessage(
       chatId,
       '📖 Help:\n\n' +
@@ -759,11 +813,11 @@ app.get('/api/clusters', (req, res) => {
 
 const PORT = process.env.PORT || 3001;
 
-const server = app.listen(PORT, 'localhost', () => {
+const server = app.listen(PORT, '0.0.0.0', () => {
   console.log('╔═══════════════════════════════════════════════════════╗');
   console.log('║  🎯 POLYMARKET WALLET TRACKER - BACKEND STARTED        ║');
-  console.log(`║  📊 REST API:      http://localhost:${PORT}              ║`);
-  console.log(`║  🔌 WebSocket:     ws://localhost:${PORT}                ║`);
+  console.log(`║  📊 REST API:      http://0.0.0.0:${PORT}                ║`);
+  console.log(`║  🔌 WebSocket:     ws://0.0.0.0:${PORT}                  ║`);
   console.log('║  💾 Database:      ./polymarket_tracker.db            ║');
   console.log('║  🚀 24/7 Monitoring: ACTIVE                           ║');
   console.log('╚═══════════════════════════════════════════════════════╝');
