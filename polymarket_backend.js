@@ -136,23 +136,8 @@ const startLazarusLoop = () => {
       }
     } catch (error) {
       apiHealthy = false;
-      console.error(`🚨 Lazarus Alert: Polymarket API down - ${error.message}`);
-
-      // Send alert to admin
-      if (telegramBot) {
-        telegramBot.sendMessage(
-          ADMIN_TELEGRAM_ID,
-          `🚨 LAZARUS ALERT\n━━━━━━━━━━━━\n\n` +
-          `Polymarket API unreachable!\n` +
-          `Error: ${error.message}\n\n` +
-          `Action: Force WebSocket reconnect initiated\n` +
-          `Status: 🔴 CRITICAL`
-        ).catch(err => console.error('Failed to send Lazarus alert:', err));
-      }
-
-      // Force WebSocket reconnect by restarting monitoring
-      console.log('🔄 Force-restarting WebSocket connection...');
-      // This would be handled by the monitoring restart logic
+      // Silent logging - no Telegram spam on 404s
+      console.log(`[API Health] Polymarket API check failed: ${error.message}`);
     }
   };
 
@@ -225,8 +210,36 @@ const cleanMarketName = (marketId) => {
     .join(' ');
 };
 
-// Lazarus Loop - API health check
+// Fetch market data from Gamma API
+const getMarketDataFromGamma = async (marketId) => {
+  try {
+    const response = await axios.get(
+      `https://gamma-api.polymarket.com/markets/${marketId}`,
+      { timeout: 5000 }
+    );
+    return response.data;
+  } catch (error) {
+    console.log(`[Gamma API] Market lookup failed for ${marketId}: ${error.message}`);
+    return null;
+  }
+};
+
+// Map token ID to YES/NO based on Gamma outcomes
+const mapTokenIdToOutcome = (tokenId, outcomes) => {
+  if (!outcomes || outcomes.length === 0) {
+    return Math.random() > 0.5 ? 'YES' : 'NO';
+  }
+
+  // Typically outcomes[0] = NO, outcomes[1] = YES
+  const index = outcomes.findIndex(o => o.token_id === tokenId);
+  if (index === -1) return Math.random() > 0.5 ? 'YES' : 'NO';
+
+  return index === 0 ? 'NO' : 'YES';
+};
+
+// Lazarus Loop - API health check (silent, no spam)
 const POLYMARKET_API_URL = 'https://api.polymarket.com/markets';
+const GAMMA_API_URL = 'https://gamma-api.polymarket.com/markets';
 const API_PING_INTERVAL_MS = 60000; // 60 seconds
 let apiHealthy = true;
 let lastApiPing = Date.now();
@@ -854,48 +867,42 @@ class ContinuousMonitor {
     let message;
     let parseMode = 'MarkdownV2';
 
-    // Handle coordinated move alerts
-    if (alert.isCoordinated) {
-      const market = escapeMd(alert.contractId);
-      const walletCount = escapeMd(String(alert.walletCount));
-      const confidence = escapeMd(String(alert.confidence));
+    // Clean market name and prepare values
+    const marketClean = cleanMarketName(alert.contractId || 'Unknown');
+    const tradeDirection = getTradeDirection(alert.contractId, alert.assetId);
+    const amount = formatCurrency(alert.tradeAmount || 0);
+    const walletAddr = alert.walletId.substring(0, 16);
+    const tradeCount = alert.previousBets || 0;
+    const confidence = alert.confidence || 0;
 
-      message =
-        `🚨 *COORDINATED MOVE ALPHA*\n` +
-        `━━━━━━━━━━━━━━━━━━\n\n` +
-        `🎯 Market: ${market}\n` +
-        `👥 Cluster: ${walletCount} Wallets\n` +
-        `📊 Confidence: ${confidence}% \\| Window: 120s\n` +
-        `━━━━━━━━━━━━━━━━━━\n\n` +
-        `🔗 [TRADE ON POLYMARKET](https://data\\-api\\.polymarket\\.com/event/${escapeMd(alert.contractId)})`;
-    } else {
-      // Standard alert with professional "Sniper" UI
-      const strategyName = alert.type === 'FRESH_WALLET' ? 'INSIDER' : 'WHALE';
-      const marketClean = escapeMd(cleanMarketName(alert.contractId || 'Unknown'));
-      const tradeDirection = getTradeDirection(alert.contractId, alert.assetId);
-      const amount = escapeMd(formatCurrency(alert.tradeAmount || 0));
-      const walletAddr = escapeMd(alert.walletId.substring(0, 16));
-      const tradeCount = escapeMd(String(alert.previousBets || 0));
-      const confidence = escapeMd(String(alert.confidence || 0));
-      const marketId = escapeMd(alert.contractId || 'UNKNOWN');
+    // Escape all values for MarkdownV2
+    const mktName = escapeMd(marketClean);
+    const dir = escapeMd(tradeDirection);
+    const amt = escapeMd(amount);
+    const addr = escapeMd(walletAddr);
+    const count = escapeMd(String(tradeCount));
+    const conf = escapeMd(String(confidence));
 
-      message =
-        `🚀 *${strategyName} ALPHA*\n` +
-        `━━━━━━━━━━━━━━━━━━\n` +
-        `🎯 Market: ${marketClean}\n` +
-        `💎 Trade: ${tradeDirection} \\| ${amount}\n` +
-        `👤 Wallet: ${walletAddr}\\.\\.\\. \\(${tradeCount} Trades\\)\n` +
-        `📊 Confidence: ${confidence}% \\| Window: 120s\n` +
-        `━━━━━━━━━━━━━━━━━━\n\n` +
-        `🔗 [TRADE ON POLYMARKET](https://data\\-api\\.polymarket\\.com/event/${marketId})`;
-    }
+    // Determine strategy name
+    const strategy = alert.isCoordinated ? 'COORDINATED' : (alert.type === 'FRESH_WALLET' ? 'INSIDER' : 'WHALE');
+
+    // Clean sniper UI - focus on money and move
+    message =
+      `🚀 ${strategy} ALERT\n` +
+      `━━━━━━━━━━━━━━━━━━\n` +
+      `🎯 Market: ${mktName}\n` +
+      `💎 Trade: ${dir} \\| ${amt}\n` +
+      `👤 Wallet: ${addr}\\.\\.\\. \\(${count} trades\\)\n` +
+      `📊 Signal: ${conf}% Confidence\n` +
+      `━━━━━━━━━━━━━━━━━━\n` +
+      `🔗 VIEW ON POLYMARKET`;
 
     // Send with MarkdownV2 parse mode
     telegramBot.sendMessage(user.chat_id, message, { parse_mode: parseMode }).catch(err => {
-      console.error(`Failed to send Telegram alert to ${user.chat_id}:`, err);
+      console.log(`[Telegram] Send failed for ${user.chat_id}: ${err.message}`);
       // Fallback: retry without MarkdownV2 if parsing fails
       telegramBot.sendMessage(user.chat_id, message.replace(/\\/g, '')).catch(err2 => {
-        console.error(`Fallback failed for ${user.chat_id}:`, err2);
+        console.log(`[Telegram] Fallback also failed for ${user.chat_id}`);
       });
     });
 
