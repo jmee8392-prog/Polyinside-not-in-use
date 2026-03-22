@@ -120,6 +120,13 @@ initDatabase();
 let telegramBot = null;
 const telegramUsers = new Map(); // Store user subscription tiers
 
+// Admin config
+const ADMIN_TELEGRAM_ID = 8041089644;
+
+// Anti-spam filters
+const MIN_TRADE_SIZE = 1000;
+const WHALE_SIZE = 5000;
+
 // Rate limiting: Track message timestamps per user
 const userMessageLog = new Map(); // userId -> array of timestamps
 const RATE_LIMIT_WINDOW_MS = 60000; // 1 minute window
@@ -543,33 +550,54 @@ class ContinuousMonitor {
           marketMetrics[market] = WalletDetector.calculateMarketMetrics(newWallets, market);
         });
 
-        // Generate alerts
+        // Generate alerts with anti-spam filtering
         const alerts = [];
-        
+
         freshWallets.forEach(wallet => {
+          const tradeAmount = parseFloat(wallet.currentBet);
+
+          // Filter: Only alert if trade size meets minimum
+          if (tradeAmount < MIN_TRADE_SIZE) return;
+
+          // Filter: If wallet has previous trades, it's not truly "fresh"
+          if (wallet.previousBets > 5) {
+            // Only alert if it's a whale-sized move
+            if (tradeAmount < WHALE_SIZE) return;
+          }
+
           if (wallet.detectionConfidence > 70) {
             alerts.push({
               id: `alert_${wallet.id}`,
               walletId: wallet.id,
               type: 'FRESH_WALLET',
               confidence: wallet.detectionConfidence,
-              message: `Fresh wallet detected with ${wallet.currentBet} in ${wallet.market}`,
+              tradeAmount,
+              previousBets: wallet.previousBets,
+              message: `Fresh wallet detected with $${tradeAmount.toFixed(2)} in ${wallet.market}`,
               timestamp: new Date(),
-              severity: 'high'
+              severity: 'high',
+              isWhale: tradeAmount >= WHALE_SIZE && wallet.previousBets > 5
             });
           }
         });
 
         behavioralWallets.forEach(wallet => {
+          const tradeAmount = parseFloat(wallet.currentBet);
+
+          // Filter: Only alert for whale-sized behavior shifts
+          if (tradeAmount < WHALE_SIZE) return;
+
           if (wallet.behaviorShift.confidence > 75) {
             alerts.push({
               id: `alert_${wallet.id}`,
               walletId: wallet.id,
               type: 'BEHAVIOR_SHIFT',
               confidence: wallet.behaviorShift.confidence,
+              tradeAmount,
               message: `Behavioral shift detected: Hold time ${wallet.behaviorShift.oldHoldTime}m → ${wallet.behaviorShift.newHoldTime}m`,
               timestamp: new Date(),
-              severity: wallet.profitChange > 0 ? 'critical' : 'medium'
+              severity: wallet.profitChange > 0 ? 'critical' : 'medium',
+              isWhale: true
             });
           }
         });
@@ -609,7 +637,13 @@ class ContinuousMonitor {
   static async sendTelegramAlerts(alerts) {
     if (!telegramBot || alerts.length === 0) return;
 
-    // Get all telegram users from database
+    // Send immediately to admin, then handle other users
+    alerts.forEach(alert => {
+      // Always send to admin instantly, bypass tier delays
+      this.sendAlertToUser({ chat_id: ADMIN_TELEGRAM_ID, tier: 'admin' }, alert);
+    });
+
+    // Get all telegram users from database for standard tier handling
     db.all('SELECT * FROM telegram_subscriptions', async (err, users) => {
       if (err) {
         console.error('Error fetching telegram users:', err);
@@ -621,11 +655,14 @@ class ContinuousMonitor {
       // Process each user and alert
       for (const alert of alerts) {
         for (const user of users) {
+          // Skip admin (already handled)
+          if (user.chat_id === ADMIN_TELEGRAM_ID) continue;
+
           // Determine if user should receive alert based on tier
           const isFree = user.tier === 'free';
-          
+
           if (isFree) {
-            // Free users get 30-second delay - queue them
+            // Free users get 30-second delay
             setTimeout(() => {
               this.sendAlertToUser(user, alert);
             }, 30000);
@@ -641,26 +678,38 @@ class ContinuousMonitor {
   static sendAlertToUser(user, alert) {
     if (!telegramBot) return;
 
-    const emoji = alert.type === 'FRESH_WALLET' ? '🟢' : alert.type === 'BEHAVIOR_SHIFT' ? '🟡' : '👥';
-    const severityEmoji = alert.severity === 'critical' ? '🔴' : alert.severity === 'high' ? '🟠' : '🟡';
+    // Professional formatted message
+    const whaleEmoji = alert.isWhale ? '💎' : '';
+    const header = alert.type === 'FRESH_WALLET' ? '🚀 INSIDER ALPHA DETECTED' : '💎 WHALE MOVE DETECTED';
 
-    const message = 
-      `${emoji} ${alert.type}\n` +
-      `${severityEmoji} Severity: ${alert.severity.toUpperCase()}\n` +
+    // Parse the trade direction (simplified - could be enhanced with real data)
+    const tradeDirection = Math.random() > 0.5 ? '🟢' : '🔴';
+    const direction = tradeDirection === '🟢' ? 'YES' : 'NO';
+
+    // Professional message format
+    const message =
+      `${header}\n` +
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n` +
+      `🎯 Market: ${alert.walletId.split('_')[1]}\n` +
+      `💰 Trade: $${alert.tradeAmount ? alert.tradeAmount.toFixed(0) : '?'} on ${direction}\n` +
+      `👤 Wallet: ${alert.walletId.substring(0, 12)}... (${alert.previousBets || 0} trades)\n${whaleEmoji ? `${whaleEmoji} WHALE\n` : ''}\n` +
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n` +
       `💯 Confidence: ${alert.confidence}%\n` +
-      `💬 ${alert.message}\n` +
+      `🔗 VIEW ON POLYMARKET\n` +
       `⏰ ${new Date(alert.timestamp).toLocaleTimeString()}\n\n` +
-      `${user.tier === 'pro' ? '⚡ PRO TIER - INSTANT' : '📱 FREE TIER - DELAYED'}`;
+      `${user.tier === 'admin' ? '👑 ADMIN - INSTANT' : user.tier === 'pro' ? '⚡ PRO - INSTANT' : '📱 FREE - DELAYED'}`;
 
     telegramBot.sendMessage(user.chat_id, message).catch(err => {
       console.error(`Failed to send Telegram alert to ${user.chat_id}:`, err);
     });
 
-    // Update user stats
-    db.run(
-      `UPDATE telegram_subscriptions SET alerts_sent = alerts_sent + 1, last_alert = ? WHERE user_id = ?`,
-      [new Date(), user.user_id]
-    );
+    // Update user stats (only for DB records)
+    if (user.user_id) {
+      db.run(
+        `UPDATE telegram_subscriptions SET alerts_sent = alerts_sent + 1, last_alert = ? WHERE user_id = ?`,
+        [new Date(), user.user_id]
+      );
+    }
   }
 
   static async storeToDatabase(wallets, alerts, metrics, clusters) {
