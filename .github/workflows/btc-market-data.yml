@@ -1,5 +1,8 @@
 name: Free BTC OHLCV snapshots
 on:
+  push:
+    paths:
+      - '.github/workflows/btc-market-data.yml'
   schedule:
     - cron: '47 * * * *'
   workflow_dispatch:
