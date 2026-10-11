@@ -5,10 +5,13 @@ on:
       - '.github/workflows/btc-market-data.yml'
       - 'btc-refresh-trigger.txt'
   schedule:
-    - cron: '9,29,49 * * * *'
+    - cron: '7,12,17,27,37,47,57 * * * *'
   workflow_dispatch:
 permissions:
   contents: write
+concurrency:
+  group: btc-ohlcv-updater
+  cancel-in-progress: true
 jobs:
   update-data:
     runs-on: ubuntu-latest
