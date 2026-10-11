@@ -35,8 +35,12 @@ jobs:
                       continue
                   out.append([ts, float(c[1]),float(c[2]),float(c[3]),float(c[4]),float(c[5])])
               out.sort(key=lambda c:c[0])
-              if not out or NOW - out[-1][0] > cutoff * 2 + 900:
-                  raise RuntimeError("Stale OHLCV candles")
+              expected_last_open = (NOW // cutoff) * cutoff - cutoff
+              if not out or out[-1][0] < expected_last_open:
+                  got = out[-1][0] if out else None
+                  raise RuntimeError(f"Missing latest completed {minutes}m candle: expected open {expected_last_open}, got {got}")
+              if out[-1][0] != expected_last_open:
+                  raise RuntimeError(f"Unexpected future or misaligned {minutes}m candle: {out[-1][0]}")
               return out[-count:]
           
           def kraken():
