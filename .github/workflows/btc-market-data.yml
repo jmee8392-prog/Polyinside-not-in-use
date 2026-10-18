@@ -5,7 +5,10 @@ on:
       - '.github/workflows/btc-market-data.yml'
       - 'btc-refresh-trigger.txt'
   schedule:
-    - cron: '7,12,17,27,37,47,57 * * * *'
+    # Two pre-alert attempts. GitHub cron was dropping the previous
+    # seven-runs-per-hour schedule for hours at a time.
+    - cron: '7 * * * *'
+    - cron: '12 * * * *'
   workflow_dispatch:
 permissions:
   contents: write
